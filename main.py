@@ -19,7 +19,14 @@ app = FastAPI(
 # Настройка CORS для React Native приложения
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost",
+        "http://localhost:3000",
+        "http://localhost:19006",  # Expo Dev Tools
+        "http://10.0.2.2:8000",    # Android эмулятор
+        "http://10.0.2.2:19006",   # Android Expo
+        "exp://localhost:19000",    # Expo
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
