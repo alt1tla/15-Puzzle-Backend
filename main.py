@@ -20,12 +20,15 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost",
-        "http://localhost:3000",
-        "http://localhost:19006",  # Expo Dev Tools
-        "http://10.0.2.2:8000",    # Android эмулятор
-        "http://10.0.2.2:19006",   # Android Expo
-        "exp://localhost:19000",    # Expo
+        "*"
+        # "http://localhost",
+        # "http://localhost:8081",
+        # "http://localhost:3000",
+        # "http://localhost:19006",  # Expo Dev Tools
+        # "http://10.0.2.2:8000",    # Android эмулятор
+        # "http://10.0.2.2:19006",   # Android Expo
+        # "exp://localhost:19000",    # Expo
+        # "exp://1fwpitk-anonymous-8081.exp.direct",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -159,7 +162,7 @@ async def get_detailed_stats(
     stats = {}
     
     for board_size in [3, 4, 5]:
-        for game_mode in [models.GameMode.CLASSIC, models.GameMode.TIMED]:
+        for game_mode in [models.GameMode.classic, models.GameMode.timed]:
             key = f"{game_mode.value}_{board_size}x{board_size}"
             
             entries = db.query(models.LeaderboardEntry).filter(

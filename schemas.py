@@ -4,8 +4,8 @@ from typing import List, Optional
 from enum import Enum
 
 class GameMode(str, Enum):
-    CLASSIC = "classic"
-    TIMED = "timed"
+    classic = "classic"
+    timed = "timed"
 
 class LeaderboardEntryBase(BaseModel):
     device_id: str = Field(..., min_length=1, max_length=100)

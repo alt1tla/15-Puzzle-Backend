@@ -4,8 +4,8 @@ import datetime
 import enum
 
 class GameMode(enum.Enum):
-    CLASSIC = "classic"
-    TIMED = "timed"
+    classic = "classic"
+    timed = "timed"
 
 class LeaderboardEntry(Base):
     __tablename__ = "leaderboard"
