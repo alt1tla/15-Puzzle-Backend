@@ -30,6 +30,10 @@ class LeaderboardResponse(BaseModel):
     total_count: int
     board_size: int
     game_mode: GameMode
+    user_position: Optional[int] = None  
+ 
+    class Config:
+        from_attributes = True
 
 class PlayerStats(BaseModel):
     device_id: str

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
-from typing import List
+from typing import List, Optional
 import models
 import schemas
 from database import engine, get_db, Base
@@ -66,30 +66,68 @@ async def get_leaderboard(
     board_size: int = Query(..., ge=3, le=5, description="Размер поля: 3, 4 или 5"),
     game_mode: schemas.GameMode = Query(..., description="Режим игры: classic или timed"),
     limit: int = Query(50, ge=1, le=100, description="Количество записей"),
+    device_id: str = Query(..., description="Device ID пользователя"),
     db: Session = Depends(get_db)
 ):
     """
     Получить таблицу лидеров для конкретного режима и размера поля
     """
+    # 1. Получаем топ игроков по limit
     entries = db.query(models.LeaderboardEntry).filter(
         models.LeaderboardEntry.board_size == board_size,
         models.LeaderboardEntry.game_mode == game_mode
     ).order_by(
-        models.LeaderboardEntry.time_seconds,  # Сначала по времени
-        models.LeaderboardEntry.moves          # Затем по количеству ходов
+        models.LeaderboardEntry.time_seconds,
+        models.LeaderboardEntry.moves
     ).limit(limit).all()
     
+    # 2. Общее количество записей в категории
     total_count = db.query(models.LeaderboardEntry).filter(
         models.LeaderboardEntry.board_size == board_size,
         models.LeaderboardEntry.game_mode == game_mode
     ).count()
     
+    # 3. Проверяем, есть ли пользователь в топе (среди entries)
+    user_in_top = False
+    user_position = None
+    
+    # 4. Если пользователя НЕТ в топе, тогда ищем его позицию отдельно
+    if not user_in_top:
+        # Найти лучший результат пользователя в этой категории
+        user_best_entry = db.query(models.LeaderboardEntry).filter(
+            models.LeaderboardEntry.device_id == device_id,
+            models.LeaderboardEntry.board_size == board_size,
+            models.LeaderboardEntry.game_mode == game_mode
+        ).order_by(
+            models.LeaderboardEntry.time_seconds,
+            models.LeaderboardEntry.moves
+        ).first()
+        
+        if user_best_entry:
+            # Подсчитываем позицию пользователя
+            # Считаем сколько игроков имеют лучшее время или такое же время, но меньше ходов
+            better_players_count = db.query(func.count(models.LeaderboardEntry.id)).filter(
+                models.LeaderboardEntry.board_size == board_size,
+                models.LeaderboardEntry.game_mode == game_mode,
+                (
+                    (models.LeaderboardEntry.time_seconds < user_best_entry.time_seconds) |
+                    (
+                        (models.LeaderboardEntry.time_seconds == user_best_entry.time_seconds) &
+                        (models.LeaderboardEntry.moves < user_best_entry.moves)
+                    )
+                )
+            ).scalar()
+            
+            user_position = better_players_count + 1 if better_players_count is not None else 1
+    
     return schemas.LeaderboardResponse(
         entries=entries,
         total_count=total_count,
         board_size=board_size,
-        game_mode=game_mode
+        game_mode=game_mode,
+        user_position=user_position  
     )
+
 
 @app.get("/leaderboard/top", response_model=List[schemas.LeaderboardEntryResponse])
 async def get_top_players(
