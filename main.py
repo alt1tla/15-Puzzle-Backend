@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
-from typing import List, Optional
+from sqlalchemy import desc, func, asc, cast, Integer
+from typing import List
 import models
 import schemas
 from database import engine, get_db, Base
@@ -48,182 +48,143 @@ async def add_leaderboard_entry(
     entry: schemas.LeaderboardEntryCreate,
     db: Session = Depends(get_db)
 ):
-    """
-    Добавить новую запись в таблицу рейтинга
-    """
-    # Проверяем валидность размера поля
     if entry.board_size not in [3, 4, 5]:
         raise HTTPException(status_code=400, detail="Board size must be 3, 4 or 5")
-    
+
+    game_mode_db = models.GameMode(entry.game_mode.value)
+
+    # 1. Ищем ЛУЧШУЮ существующую запись пользователя
+    existing_entries = db.query(models.LeaderboardEntry).filter(
+        models.LeaderboardEntry.device_id == entry.device_id,
+        models.LeaderboardEntry.board_size == entry.board_size,
+        models.LeaderboardEntry.game_mode == game_mode_db
+    ).all()
+
+    def is_new_better(new, old):
+        if game_mode_db == models.GameMode.classic:
+            return (new.moves, new.time_seconds) < (old.moves, old.time_seconds)
+        else:  # timed
+            return (new.time_seconds, new.moves) < (old.time_seconds, old.moves)
+
+    best_existing = None
+    if existing_entries:
+        best_existing = min(
+            existing_entries,
+            key=lambda e: (
+                e.moves, e.time_seconds
+            ) if game_mode_db == models.GameMode.classic
+            else (
+                e.time_seconds, e.moves
+            )
+        )
+
+        # 2. Если новая запись ХУЖЕ — отклоняем
+        if not is_new_better(entry, best_existing):
+            raise HTTPException(
+                status_code=409,
+                detail="Existing result is better or equal"
+            )
+
+        # 3. Удаляем старую лучшую запись
+        db.delete(best_existing)
+        db.commit()
+
+    # 4. Сохраняем новую
     db_entry = models.LeaderboardEntry(**entry.model_dump())
     db.add(db_entry)
     db.commit()
     db.refresh(db_entry)
+
     return db_entry
 
 @app.get("/leaderboard/", response_model=schemas.LeaderboardResponse)
 async def get_leaderboard(
-    board_size: int = Query(..., ge=3, le=5, description="Размер поля: 3, 4 или 5"),
-    game_mode: schemas.GameMode = Query(..., description="Режим игры: classic или timed"),
-    limit: int = Query(50, ge=1, le=100, description="Количество записей"),
-    device_id: str = Query(..., description="Device ID пользователя"),
+    board_size: int = Query(..., ge=3, le=5),
+    game_mode: schemas.GameMode = Query(...),
+    limit: int = Query(50, ge=1, le=100),
+    device_id: str = Query(...),
     db: Session = Depends(get_db)
 ):
-    """
-    Получить таблицу лидеров для конкретного режима и размера поля
-    """
-    # 1. Получаем топ игроков по limit
-    entries = db.query(models.LeaderboardEntry).filter(
-        models.LeaderboardEntry.board_size == board_size,
-        models.LeaderboardEntry.game_mode == game_mode
-    ).order_by(
-        models.LeaderboardEntry.time_seconds,
-        models.LeaderboardEntry.moves
-    ).limit(limit).all()
+    # 1. Получаем топ игроков
+    if game_mode.value == models.GameMode.classic.value:
+        query = db.query(models.LeaderboardEntry).filter(
+            models.LeaderboardEntry.board_size == board_size,
+            models.LeaderboardEntry.game_mode == game_mode
+        ).order_by(
+            asc(cast(models.LeaderboardEntry.moves, Integer)),  # Явный ASC
+            asc(cast(models.LeaderboardEntry.time_seconds, Integer))
+        )
+    else:  # timed
+        query = db.query(models.LeaderboardEntry).filter(
+            models.LeaderboardEntry.board_size == board_size,
+            models.LeaderboardEntry.game_mode == game_mode
+        ).order_by(
+            asc(cast(models.LeaderboardEntry.time_seconds, Integer)),
+            asc(cast(models.LeaderboardEntry.moves, Integer))
+        )
     
-    # 2. Общее количество записей в категории
+    entries = query.limit(limit).all()
     total_count = db.query(models.LeaderboardEntry).filter(
         models.LeaderboardEntry.board_size == board_size,
         models.LeaderboardEntry.game_mode == game_mode
     ).count()
     
-    # 3. Проверяем, есть ли пользователь в топе (среди entries)
-    user_in_top = False
+    # 2. Проверяем, есть ли пользователь в топе
     user_position = None
+    user_in_top = False
     
-    # 4. Если пользователя НЕТ в топе, тогда ищем его позицию отдельно
+    for i, entry in enumerate(entries, 1):
+        if entry.device_id == device_id:
+            user_in_top = True
+            user_position = i
+            break
+    
+    # 3. Если пользователя нет в топе, ищем его позицию
     if not user_in_top:
-        # Найти лучший результат пользователя в этой категории
-        user_best_entry = db.query(models.LeaderboardEntry).filter(
+        # Найти ВСЕ записи пользователя
+        user_entries = db.query(models.LeaderboardEntry).filter(
             models.LeaderboardEntry.device_id == device_id,
             models.LeaderboardEntry.board_size == board_size,
             models.LeaderboardEntry.game_mode == game_mode
-        ).order_by(
-            models.LeaderboardEntry.time_seconds,
-            models.LeaderboardEntry.moves
-        ).first()
-        
-        if user_best_entry:
-            # Подсчитываем позицию пользователя
-            # Считаем сколько игроков имеют лучшее время или такое же время, но меньше ходов
-            better_players_count = db.query(func.count(models.LeaderboardEntry.id)).filter(
+        ).all()
+        if user_entries:
+            # Находим лучший результат пользователя
+            if game_mode.value == models.GameMode.classic.value:
+                user_best_entry = min(user_entries, key=lambda x: (x.moves, x.time_seconds))
+            else:  # timed
+                user_best_entry = min(user_entries, key=lambda x: (x.time_seconds, x.moves))
+            # Подсчитываем позицию
+            # Получаем ВСЕ записи в категории с правильной сортировкой
+            all_query = db.query(models.LeaderboardEntry).filter(
                 models.LeaderboardEntry.board_size == board_size,
-                models.LeaderboardEntry.game_mode == game_mode,
-                (
-                    (models.LeaderboardEntry.time_seconds < user_best_entry.time_seconds) |
-                    (
-                        (models.LeaderboardEntry.time_seconds == user_best_entry.time_seconds) &
-                        (models.LeaderboardEntry.moves < user_best_entry.moves)
-                    )
-                )
-            ).scalar()
+                models.LeaderboardEntry.game_mode == game_mode
+            )
             
-            user_position = better_players_count + 1 if better_players_count is not None else 1
-    
+            if game_mode.value == models.GameMode.classic.value:
+                all_entries = all_query.order_by(
+                    asc(cast(models.LeaderboardEntry.moves, Integer)),  # Явный ASC
+                    asc(cast(models.LeaderboardEntry.time_seconds, Integer))
+                ).all()
+            else:
+                all_entries = all_query.order_by(
+                    asc(cast(models.LeaderboardEntry.time_seconds, Integer)),
+                    asc(cast(models.LeaderboardEntry.moves, Integer))
+                ).all()
+            
+            # Ищем позицию пользователя
+            for i, entry in enumerate(all_entries, 1):
+                if (entry.device_id == device_id and 
+                    entry.moves == user_best_entry.moves and
+                    entry.time_seconds == user_best_entry.time_seconds):
+                    user_position = i
+                    break
     return schemas.LeaderboardResponse(
         entries=entries,
         total_count=total_count,
         board_size=board_size,
         game_mode=game_mode,
-        user_position=user_position  
+        user_position=user_position
     )
-
-
-@app.get("/leaderboard/top", response_model=List[schemas.LeaderboardEntryResponse])
-async def get_top_players(
-    board_size: int = Query(..., ge=3, le=5),
-    game_mode: schemas.GameMode = Query(...),
-    top_n: int = Query(10, ge=1, le=50),
-    db: Session = Depends(get_db)
-):
-    """
-    Получить топ N игроков для конкретного режима и размера поля
-    """
-    entries = db.query(models.LeaderboardEntry).filter(
-        models.LeaderboardEntry.board_size == board_size,
-        models.LeaderboardEntry.game_mode == game_mode
-    ).order_by(
-        models.LeaderboardEntry.time_seconds,
-        models.LeaderboardEntry.moves
-    ).limit(top_n).all()
-    
-    return entries
-
-@app.get("/stats/{device_id}", response_model=schemas.PlayerStats)
-async def get_player_stats(
-    device_id: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Получить общую статистику игрока
-    """
-    # Общее количество игр
-    total_games = db.query(models.LeaderboardEntry).filter(
-        models.LeaderboardEntry.device_id == device_id
-    ).count()
-    
-    # Лучшее время и ходы
-    best_time = db.query(func.min(models.LeaderboardEntry.time_seconds)).filter(
-        models.LeaderboardEntry.device_id == device_id
-    ).scalar()
-    
-    best_moves = db.query(func.min(models.LeaderboardEntry.moves)).filter(
-        models.LeaderboardEntry.device_id == device_id
-    ).scalar()
-    
-    # Средние показатели
-    avg_time = db.query(func.avg(models.LeaderboardEntry.time_seconds)).filter(
-        models.LeaderboardEntry.device_id == device_id
-    ).scalar()
-    
-    avg_moves = db.query(func.avg(models.LeaderboardEntry.moves)).filter(
-        models.LeaderboardEntry.device_id == device_id
-    ).scalar()
-    
-    return schemas.PlayerStats(
-        device_id=device_id,
-        total_games=total_games,
-        best_time=best_time,
-        best_moves=best_moves,
-        average_time=float(avg_time) if avg_time else None,
-        average_moves=float(avg_moves) if avg_moves else None
-    )
-
-@app.get("/stats/{device_id}/detailed")
-async def get_detailed_stats(
-    device_id: str,
-    db: Session = Depends(get_db)
-):
-    """
-    Получить детальную статистику по всем режимам и размерам
-    """
-    stats = {}
-    
-    for board_size in [3, 4, 5]:
-        for game_mode in [models.GameMode.classic, models.GameMode.timed]:
-            key = f"{game_mode.value}_{board_size}x{board_size}"
-            
-            entries = db.query(models.LeaderboardEntry).filter(
-                models.LeaderboardEntry.device_id == device_id,
-                models.LeaderboardEntry.board_size == board_size,
-                models.LeaderboardEntry.game_mode == game_mode
-            ).all()
-            
-            if entries:
-                best_time = min(e.time_seconds for e in entries)
-                best_moves = min(e.moves for e in entries)
-                avg_time = sum(e.time_seconds for e in entries) / len(entries)
-                avg_moves = sum(e.moves for e in entries) / len(entries)
-                
-                stats[key] = {
-                    "games_played": len(entries),
-                    "best_time": best_time,
-                    "best_moves": best_moves,
-                    "average_time": round(avg_time, 2),
-                    "average_moves": round(avg_moves, 2)
-                }
-    
-    return {"device_id": device_id, "statistics": stats}
 
 if __name__ == "__main__":
     import uvicorn
